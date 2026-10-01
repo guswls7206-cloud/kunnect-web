@@ -1,0 +1,14 @@
+# 로컬 개발용 PostgreSQL (일반 PostgreSQL, Supabase 미사용)
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: kunnect
+      POSTGRES_PASSWORD: kunnect
+      POSTGRES_DB: kunnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - kunnect-pg:/var/lib/postgresql
+volumes:
+  kunnect-pg:

@@ -1,0 +1,7 @@
+node_modules
+.env
+.pgdata
+/storage
+.test-pgdata
+dist
+/coverage

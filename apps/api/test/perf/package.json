@@ -1,0 +1,15 @@
+{
+  "name": "@kunnect/api-perf",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "KUnnect API 부하 테스트(autocannon). pg·sharp 는 상위 apps/api 의 node_modules 를 재사용한다.",
+  "scripts": {
+    "seed": "node seed-load.mjs",
+    "run": "node run.mjs",
+    "explain": "node explain.mjs"
+  },
+  "dependencies": {
+    "autocannon": "^8.0.0"
+  }
+}

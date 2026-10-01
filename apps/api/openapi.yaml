@@ -1,0 +1,773 @@
+openapi: 3.0.3
+info:
+  title: KUnnect API
+  version: 1.0.0
+  description: |
+    KUnnect 백엔드 API 계약 (docs/dev-plan-backend.md 5절 기준, 계약 우선).
+    - 인증: 세션 쿠키 `kunnect_sid` (HttpOnly). 동일 출처(Next.js rewrites 프록시) 전제, CORS 비활성.
+    - ID는 정수. 시각은 ISO 8601 UTC 문자열.
+    - 목록은 커서 페이지네이션: `?limit=20&cursor=<opaque>` -> `{items, nextCursor}`.
+    - 오류는 항상 `{error:{code,message,fields?}}`.
+    - 비로그인 열람 불가(모든 API는 로그인 필요, signup/login/health 제외).
+    - 세션 쿠키가 있는 상태 변경 요청(POST/PATCH/DELETE)은 `Origin` 헤더 필수(없거나 허용 목록 밖이면 403 `BAD_ORIGIN`).
+    - 공통 오류 코드(엔드포인트별로 반복 기재하지 않음): 400 `VALIDATION_ERROR`(fields 포함) / `BAD_REQUEST`(깨진 JSON 등) / `FUTURE_TIME`(fields.occurredAt) / `WEAK_PASSWORD`, 401 `UNAUTHENTICATED`, 403 `FORBIDDEN` / `BAD_ORIGIN`, 404 `NOT_FOUND`, 409 `CONFLICT` 계열(각 엔드포인트 참조: `POST_CLOSED`, `READ_ONLY`, `ALREADY_DECIDED`, `PHOTO_IN_USE` 등), 413 `PAYLOAD_TOO_LARGE`(JSON 100KB 초과) / `FILE_TOO_LARGE`, 415 `UNSUPPORTED_TYPE`, 422 `PHOTO_NOT_OWNED` / `CORRUPT_IMAGE`, 429 `RATE_LIMITED`(요청 한도, 하루 글 작성 10건, 임시 사진 20장 포함), 500 `INTERNAL`.
+    - 쪽지 알림 배지: `GET /notifications` 의 `unreadCount` 는 쪽지(MESSAGE) 알림을 **포함**한 읽지 않은 알림 수이고, `/notifications/unread-count`·`/me` 의 `unread.notifications` 는 쪽지 알림을 제외한다(쪽지는 `unread.messages` 로 따로 센다).
+    - 차단 시 비노출 [사용자 결정 + 가정/제안 A27 양방향]: A 가 B 를 차단하면 A 와 B 모두 서로의 프로필(`/users/{id}`, `/users/{id}/posts`)과 글(목록·검색·상세·댓글 목록/작성·매칭 후보·매칭 상세/결정)을 볼 수 없고 직접 id 접근은 404 `NOT_FOUND`(차단 사실은 드러내지 않음). 차단 상대가 유발한 알림(댓글/답글/쪽지/매칭)도 목록과 읽지 않음 수에서 제외된다. 댓글은 숨기지 않는다. 차단 목록(`/blocks`)과 해제는 그대로 동작한다.
+    - 글 열람 범위 [가정/제안]: 작성자가 종료(CLOSED)한 글과 탈퇴한 작성자의 글은 작성자 본인 외에는 404, `?status=CLOSED` 목록은 내 글만.
+    - `occurredAt` 은 오프셋이 있는 ISO 8601 문자열(예: `2026-10-01T10:00:00+09:00`, `...Z`)만 허용하며 2020-01-01 이전은 거부.
+servers:
+  - url: /api/v1
+tags:
+  - {name: auth}
+  - {name: posts}
+  - {name: photos}
+  - {name: catalog}
+  - {name: comments}
+  - {name: notifications}
+  - {name: matches}
+  - {name: conversations}
+  - {name: handovers}
+  - {name: safety}
+security:
+  - cookieAuth: []
+paths:
+  /auth/signup:
+    post:
+      tags: [auth]
+      security: []
+      summary: 회원가입 (성공 시 세션 쿠키 발급)
+      requestBody: {$ref: '#/components/requestBodies/Signup'}
+      responses:
+        '201': {description: 가입 완료, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/Me'}}}}}}
+        '400': {$ref: '#/components/responses/Validation'}
+        '409': {description: "LOGIN_ID_TAKEN | NICKNAME_TAKEN", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: 로그인
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [loginId, password], properties: {loginId: {type: string}, password: {type: string}}}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/Me'}}}}}}
+        '401': {description: INVALID_CREDENTIALS (아이디/비밀번호 구분 안 함), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /auth/logout-all:
+    post:
+      tags: [auth]
+      summary: 모든 기기에서 로그아웃 (내 세션 전부 폐기)
+      responses:
+        '204': {description: 성공 (쿠키 제거)}
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: 로그아웃
+      responses:
+        '204': {description: 성공}
+  /me:
+    get:
+      tags: [auth]
+      summary: 내 정보 + 읽지 않음 스냅샷 (폴링은 /notifications/unread-count 사용)
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Me'}}}}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+    delete:
+      tags: [auth]
+      summary: 계정 삭제(탈퇴)
+      description: |
+        [사용자 결정] 아이디·닉네임 익명화, 세션·알림·차단 삭제. 작성한 글(진행 중·종료·반환 완료 모두)과 댓글(내 댓글에 달린 답글 포함)을 **즉시 영구 삭제**한다(사진 원본·AI 사본·흐림 사본 파일, 글에 걸린 매칭·알림 포함).
+        진행 중인 인수 요청은 REJECTED 로 정리되며 탈퇴는 거부되지 않는다. 쪽지 대화·메시지는 유지되고(상대는 읽기 전용, 글 맥락 `postContext` 만 사라짐) 보존은 "마지막 메시지 후 30일" 규칙을 따른다. 신고 기록(snapshot)은 보존한다.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [password], properties: {password: {type: string}}}}}
+      responses:
+        '204': {description: 삭제됨 (쿠키 제거)}
+        '403': {description: WRONG_PASSWORD, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /me/settings:
+    patch:
+      tags: [auth]
+      summary: 알림 설정 변경
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/Settings'}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Settings'}}}}
+  /me/password:
+    post:
+      tags: [auth]
+      summary: 비밀번호 변경 (다른 세션 폐기)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [currentPassword, newPassword], properties: {currentPassword: {type: string}, newPassword: {type: string}}}}}
+      responses:
+        '204': {description: 성공}
+        '403': {description: WRONG_PASSWORD, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /me/posts:
+    get:
+      tags: [posts]
+      summary: 내가 쓴 글
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}, {name: type, in: query, schema: {$ref: '#/components/schemas/PostType'}}, {name: status, in: query, schema: {$ref: '#/components/schemas/PostStatus'}}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostCardPage'}}}}
+  /me/comments:
+    get:
+      tags: [comments]
+      summary: 내가 쓴 댓글
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/MyComment'}}, nextCursor: {type: string, nullable: true}}}}}}
+  /users/{id}:
+    get:
+      tags: [auth]
+      summary: 사용자 프로필 (loginId 비노출)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/UserProfile'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /users/{id}/posts:
+    get:
+      tags: [posts]
+      summary: 사용자의 공개 글 (OPEN/MATCHED)
+      parameters: [{$ref: '#/components/parameters/IdPath'}, {$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostCardPage'}}}}
+  /locations:
+    get:
+      tags: [catalog]
+      summary: 캠퍼스 위치 목록 (시드, 임시 더미 포함)
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Location'}}}}}}}
+  /tags:
+    get:
+      tags: [catalog]
+      summary: 태그 목록
+      parameters: [{name: preset, in: query, schema: {type: boolean}}, {name: q, in: query, schema: {type: string}}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Tag'}}}}}}}
+  /tags/suggest:
+    get:
+      tags: [catalog]
+      summary: 태그 자동완성
+      parameters: [{name: q, in: query, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Tag'}}}}}}}
+  /photos:
+    post:
+      tags: [photos]
+      summary: 사진 업로드 (임시 사진, 글 생성 시 photoIds로 연결)
+      description: JPEG/PNG/WebP만 허용(HEIC 거부). 10MB 이하. 서버가 EXIF 제거 + 리사이즈.
+      requestBody:
+        required: true
+        content: {multipart/form-data: {schema: {type: object, required: [file], properties: {file: {type: string, format: binary}}}}}
+      responses:
+        '201': {description: 업로드 완료, content: {application/json: {schema: {$ref: '#/components/schemas/Photo'}}}}
+        '413': {description: FILE_TOO_LARGE, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '415': {description: UNSUPPORTED_TYPE, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '422': {description: CORRUPT_IMAGE, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /photos/{id}:
+    patch:
+      tags: [photos]
+      summary: 민감 사진 표시 변경 (작성자만) [가정/제안]
+      description: sensitive true=민감함(흐림 사본 생성), false=민감하지 않음(민감 태그·AI 감지보다 우선), null=자동 판단으로 복귀. 응답은 작성자 관점.
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [sensitive], properties: {sensitive: {type: boolean, nullable: true}}}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PhotoSensitivity'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [photos]
+      summary: 내 사진 삭제
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 성공}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /files/photos/{name}:
+    get:
+      tags: [photos]
+      summary: 사진 원본 (로그인 필요) [가정/제안]
+      description: |
+        응답은 이미지 바이너리(image/jpeg, Cache-Control private). 임시 사진은 작성자만, 연결된 사진은 글을 볼 수 있는 사용자만(차단·종료·탈퇴 글은 404).
+        민감 사진의 원본은 작성자와 소유 확인(VERIFIED) 이후 인수 상대에게만 — 그 외에는 404 (API 가 내려준 흐림 사본 URL 을 사용). 내부 파일(ai/ 등)은 제공하지 않는다.
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: 이미지, content: {image/jpeg: {schema: {type: string, format: binary}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /files/blurred/{name}:
+    get:
+      tags: [photos]
+      summary: 민감 사진의 흐림 사본 (로그인 필요) [가정/제안]
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: 이미지, content: {image/jpeg: {schema: {type: string, format: binary}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /posts:
+    get:
+      tags: [posts]
+      summary: 글 목록 (로그인 필요)
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {name: type, in: query, schema: {$ref: '#/components/schemas/PostType'}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/PostStatus'}}
+        - {name: locationId, in: query, schema: {type: integer}, description: 특정 건물·층(Location 행) 하나}
+        - {name: buildingId, in: query, schema: {type: string}, description: 건물 전체(Location.buildingId, 모든 층 포함). locationId 와 함께 쓰면 둘 다 만족해야 함}
+        - {name: tag, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostCardPage'}}}}
+    post:
+      tags: [posts]
+      summary: 글 작성 (매칭은 비동기)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PostCreate'}}}
+      responses:
+        '201': {description: 생성됨 (PostDetail 평평한 객체, GET/PATCH 와 동일), content: {application/json: {schema: {$ref: '#/components/schemas/PostDetail'}}}}
+        '400': {$ref: '#/components/responses/Validation'}
+        '422': {description: PHOTO_NOT_OWNED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /posts/{id}:
+    get:
+      tags: [posts]
+      summary: 글 상세 (hiddenFeatures는 작성자에게만)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostDetail'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [posts]
+      summary: 글 수정 (작성자, 유형·위치 변경 불가)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PostUpdate'}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostDetail'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: POST_CLOSED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    delete:
+      tags: [posts]
+      summary: 글 삭제 (작성자, 즉시 영구 삭제) [가정/제안 A32]
+      description: |
+        작성자 본인의 글을 **즉시 영구 삭제**한다(이전에는 CLOSED 로 전환만 했음). OPEN/MATCHED/CLOSED/RETURNED 어느 상태든 가능.
+        - 사진 원본·AI 사본·흐림 사본 파일, 댓글, 태그 연결, 이 글의 매칭과 알림, 인수 요청 기록이 함께 삭제된다. 이 글에서 시작된 쪽지 대화는 남고 메시지는 유지되며 글 맥락(`postContext`)만 사라진다. 신고 기록(snapshot)은 보존된다.
+        - 삭제 후 `GET /posts/{id}` 와 `/me/posts`, 목록·검색에서 사라지고, 같은 글을 다시 `DELETE` 하면 **404**(이미 삭제됨; 작성자 확인을 위해 204 멱등으로 만들지 않음). 다른 사람의 글은 403.
+        - 진행 중인 인수 요청(REQUESTED/VERIFIED)이 있으면 409 `ACTIVE_HANDOVER`(먼저 인수를 완료하거나 거절해야 함).
+        - 조용히 닫기만 하려면 `POST /posts/{id}/status {status: CLOSED}`(종료 24시간 후 자동 삭제)를 쓴다.
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 삭제됨}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: ACTIVE_HANDOVER (진행 중인 인수 요청이 있어 삭제할 수 없음), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /posts/{id}/status:
+    post:
+      tags: [posts]
+      summary: 상태 변경 (CLOSED만 직접 가능, RETURNED는 인수 완료 플로우로만)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, enum: [CLOSED]}}}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/PostDetail'}}}}
+        '409': {description: INVALID_TRANSITION, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /posts/{id}/comments:
+    get:
+      tags: [comments]
+      summary: 댓글 목록 (최상위 + replies)
+      parameters: [{$ref: '#/components/parameters/IdPath'}, {$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Comment'}}, nextCursor: {type: string, nullable: true}}}}}}
+    post:
+      tags: [comments]
+      summary: 댓글 작성 (연락처 패턴 마스킹)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [body], properties: {body: {type: string, maxLength: 300}, parentId: {type: integer}}}}}
+      responses:
+        '201': {description: 생성됨, content: {application/json: {schema: {type: object, properties: {comment: {$ref: '#/components/schemas/Comment'}, masked: {type: boolean, description: true이면 "개인 연락은 쪽지로" 안내 표시}}}}}}
+        '400': {description: VALIDATION_ERROR | PARENT_INVALID, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: POST_CLOSED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /comments/{id}:
+    patch:
+      tags: [comments]
+      summary: 댓글 수정 (작성자)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [body], properties: {body: {type: string, maxLength: 300}}}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {comment: {$ref: '#/components/schemas/Comment'}, masked: {type: boolean}}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: COMMENT_DELETED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    delete:
+      tags: [comments]
+      summary: 댓글 삭제 (답글 있으면 자리 유지)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 성공}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /notifications:
+    get:
+      tags: [notifications]
+      summary: 알림 목록
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Notification'}}, unreadCount: {type: integer}, nextCursor: {type: string, nullable: true}}}}}}
+  /notifications/unread-count:
+    get:
+      tags: [notifications]
+      summary: 폴링용 경량 요약 (읽지 않음 배지의 canonical 폴링 엔드포인트)
+      description: 5~15초 폴링은 이 엔드포인트를 쓴다. /me 는 앱 시작·로그인 직후 1회 조회용 스냅샷(unread 포함)이며 폴링 대상이 아니다. messages 는 쪽지함 읽지 않은 메시지 수, notifications 는 쪽지 알림을 제외한 읽지 않은 알림 수.
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Unread'}}}}
+  /notifications/{id}/read:
+    post:
+      tags: [notifications]
+      summary: 읽음 처리
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 성공}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /notifications/read-all:
+    post:
+      tags: [notifications]
+      summary: 전체 읽음
+      responses:
+        '204': {description: 성공}
+  /posts/{id}/matches:
+    get:
+      tags: [matches]
+      summary: 내 글의 매칭 후보 (등급만 노출, 점수 비노출)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {matchState: {type: string, enum: [PENDING, DONE, FAILED]}, items: {type: array, items: {$ref: '#/components/schemas/MatchItem'}}}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /matches/{id}/confirm:
+    post:
+      tags: [matches]
+      summary: '내 것이 맞아요 (분실글 작성자)'
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 'MatchItem + suggestedConversation({otherUserId, postId}) — 이 값으로 POST /conversations 호출', content: {application/json: {schema: {allOf: [{$ref: '#/components/schemas/MatchItem'}, {type: object, properties: {suggestedConversation: {type: object, properties: {otherUserId: {type: integer}, postId: {type: integer}}}}}]}}}}
+        '409': {description: ALREADY_DECIDED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /matches/{id}/reject:
+    post:
+      tags: [matches]
+      summary: '아니에요 (재알림 방지)'
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/MatchItem'}}}}
+        '409': {description: ALREADY_DECIDED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /conversations:
+    get:
+      tags: [conversations]
+      summary: 쪽지함
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/ConversationItem'}}, nextCursor: {type: string, nullable: true}}}}}}
+    post:
+      tags: [conversations]
+      summary: 쪽지 시작 (글 또는 프로필에서). 기존 쌍 대화 재사용.
+      description: targetUserId 또는 postId 중 하나 이상. postId만 오면 글 작성자가 상대.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [body], properties: {targetUserId: {type: integer}, postId: {type: integer}, body: {type: string, maxLength: 1000}}}}}
+      responses:
+        '201': {description: 새 대화 생성, content: {application/json: {schema: {$ref: '#/components/schemas/ConversationStart'}}}}
+        '200': {description: 기존 대화 재사용, content: {application/json: {schema: {$ref: '#/components/schemas/ConversationStart'}}}}
+        '400': {description: SELF_MESSAGE | VALIDATION_ERROR, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: BLOCKED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /conversations/{id}:
+    get:
+      tags: [conversations]
+      summary: 대화 메타
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/ConversationItem'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [conversations]
+      summary: 쪽지함에서 대화 삭제 (내 쪽지함에서만) [가정/제안 A31]
+      description: |
+        내 쪽지함에서 이 대화를 삭제한다(사용자별 삭제). **상대방의 쪽지함과 대화 내용에는 영향이 없다.**
+        - 성공 시 204. 이미 삭제한 대화에 다시 호출해도 204(멱등). 내가 참여자가 아니거나 없는 대화면 404.
+        - 삭제한 순간까지의 메시지는 나에게 보이지 않는다(목록·메시지·읽지 않음 수·이 대화의 쪽지 알림에서 제외). 삭제된 대화의 직접 조회/전송(`GET /conversations/{id}`, `/messages` 등)은 404.
+        - **되살아남**: 삭제 후 상대가 새 쪽지를 보내거나, 내가 같은 사용자에게 `POST /conversations` 로 다시 쪽지를 보내면 같은 대화가 쪽지함에 다시 나타나며 **삭제 이후의 메시지만** 보인다(이전 내용은 복구되지 않음).
+        - **양쪽 모두 삭제**하고 양쪽 모두 새 메시지가 없으면 대화와 메시지가 즉시 영구 삭제된다.
+        - 진행 중인 인수 요청(REQUESTED/VERIFIED)이 있으면 409 `ACTIVE_HANDOVER`(먼저 인수를 완료하거나 거절해야 함). 단 상대가 탈퇴했거나 차단 관계로 대화가 읽기 전용이면 진행 중 인수 요청을 자동 거절하고 삭제한다.
+        - 보존 규칙(마지막 메시지 후 30일 무활동 시 삭제)은 그대로 유효하다.
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 삭제됨 (멱등)}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: ACTIVE_HANDOVER (진행 중인 인수 요청이 있어 삭제할 수 없음), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /conversations/{id}/messages:
+    get:
+      tags: [conversations]
+      summary: 메시지 조회 (afterId=폴링, beforeId=과거)
+      parameters: [{$ref: '#/components/parameters/IdPath'}, {name: afterId, in: query, schema: {type: integer}}, {name: beforeId, in: query, schema: {type: integer}}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Message'}}}}}}}
+    post:
+      tags: [conversations]
+      summary: 메시지 전송 (쪽지에는 연락처 제한 없음)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [body], properties: {type: {type: string, enum: [TEXT, VERIFY_QUESTION, VERIFY_ANSWER], default: TEXT}, body: {type: string, maxLength: 1000}, postId: {type: integer}}}}}
+      responses:
+        '201': {description: 성공, content: {application/json: {schema: {type: object, properties: {message: {$ref: '#/components/schemas/Message'}}}}}}
+        '409': {description: READ_ONLY (차단·종료 시, 차단 사실 비노출), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /conversations/{id}/read:
+    post:
+      tags: [conversations]
+      summary: 읽음 처리 (lastMessageId 단조 증가만)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [lastMessageId], properties: {lastMessageId: {type: integer}}}}}
+      responses:
+        '204': {description: 성공}
+  /conversations/{id}/settings:
+    patch:
+      tags: [conversations]
+      summary: 음소거
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [muted], properties: {muted: {type: boolean}}}}}
+      responses:
+        '204': {description: 성공}
+  /conversations/{id}/leave:
+    post:
+      tags: [conversations]
+      summary: 내 쪽지함에서 나가기
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '204': {description: 성공}
+  /conversations/{id}/handover:
+    post:
+      tags: [handovers]
+      summary: 인수 요청 시작 (대화당 진행 중 1건, 총 10건 상한 [가정/제안])
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [postId], properties: {postId: {type: integer}, matchId: {type: integer}}}}}
+      responses:
+        '201': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Handover'}}}}
+        '409': {description: 'ALREADY_REQUESTED(이 대화에 진행 중인 인수가 있음, 글이 달라도 동일) | HANDOVER_LIMIT(대화당 총 10건 초과) | READ_ONLY | POST_CLOSED(대상 글이 OPEN/MATCHED 가 아님)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /handovers/{id}:
+    get:
+      tags: [handovers]
+      summary: 인수 요청 조회 (내 관점의 역할·버튼 가능 여부 포함)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Handover'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /handovers/{id}/verify:
+    post:
+      tags: [handovers]
+      summary: 소유 확인 완료 (습득자). REQUESTED 에서만 전이(원자적)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Handover'}}}}
+        '409': {description: 'INVALID_TRANSITION(REQUESTED 가 아니거나 동시 요청에 졌음) | POST_CLOSED | READ_ONLY', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /handovers/{id}/complete:
+    post:
+      tags: [handovers]
+      summary: '인수 완료 확인 (양측 각각 호출, 양측 확인 시 글 RETURNED). 멱등 — 같은 쪽 재호출·완료 후 재호출은 200 이며 시스템 메시지를 다시 만들지 않는다. 양측 확인 시 상대 글(짝)도 RETURNED: 요청의 matchId, 없으면 대화 상대의 글과의 비거절 매칭에서 추론(후보 1개 또는 CONFIRMED 1개일 때만), 못 찾으면 이 글만 닫고 counterpartLinked=false. 반환된 글에 걸린 나머지 대기 매칭은 REJECTED 로 정리 [가정/제안]'
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Handover'}}}}
+        '409': {description: 'NOT_VERIFIED | INVALID_TRANSITION | READ_ONLY | POST_CLOSED(대상 글이 이미 종료됨 — 인수 요청은 REJECTED 로 취소됨)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /handovers/{id}/reject:
+    post:
+      tags: [handovers]
+      summary: 인수 거절 (습득자). REQUESTED/VERIFIED 에서만 전이(원자적)
+      parameters: [{$ref: '#/components/parameters/IdPath'}]
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {$ref: '#/components/schemas/Handover'}}}}
+        '409': {description: INVALID_TRANSITION | READ_ONLY, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /blocks:
+    get:
+      tags: [safety]
+      summary: 차단 목록
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {type: object, properties: {userId: {type: integer}, nickname: {type: string}, createdAt: {type: string, format: date-time}}}}}}}}}
+    post:
+      tags: [safety]
+      summary: 사용자 차단
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [userId], properties: {userId: {type: integer}}}}}
+      responses:
+        '204': {description: 성공}
+        '400': {description: SELF_BLOCK, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /blocks/{userId}:
+    delete:
+      tags: [safety]
+      summary: 차단 해제
+      parameters: [{name: userId, in: path, required: true, schema: {type: integer}}]
+      responses:
+        '204': {description: 성공}
+  /reports:
+    post:
+      tags: [safety]
+      summary: 신고 (저장만, 처리 절차 없음). 자기 자신의 글/댓글/쪽지/계정은 400 SELF_REPORT, 숨김·삭제된 댓글과 탈퇴한 사용자(및 그 글)는 404
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [targetType, targetId, reason], properties: {targetType: {type: string, enum: [POST, COMMENT, MESSAGE, USER]}, targetId: {type: integer}, reason: {type: string, enum: [SPAM, HARASSMENT, PRIVACY, FAKE, OTHER]}, detail: {type: string, maxLength: 200}}}}}
+      responses:
+        '201': {description: 성공, content: {application/json: {schema: {type: object, properties: {id: {type: integer}}}}}}
+        '400': {description: 'SELF_REPORT | VALIDATION_ERROR', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: ALREADY_REPORTED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /health:
+    get:
+      tags: [auth]
+      security: []
+      summary: 상태 확인
+      responses:
+        '200': {description: 성공, content: {application/json: {schema: {type: object, properties: {status: {type: string}}}}}}
+components:
+  securitySchemes:
+    cookieAuth: {type: apiKey, in: cookie, name: kunnect_sid}
+  parameters:
+    IdPath: {name: id, in: path, required: true, schema: {type: integer}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
+    Cursor: {name: cursor, in: query, schema: {type: string}, description: 이전 응답의 nextCursor (불투명 값)}
+  requestBodies:
+    Signup:
+      required: true
+      content: {application/json: {schema: {type: object, required: [loginId, password, nickname], properties: {loginId: {type: string, description: 4~20자 영소문자·숫자·_}, password: {type: string, description: 8~64자}, nickname: {type: string, description: 2~12자}}}}}
+  responses:
+    Validation: {description: VALIDATION_ERROR, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthenticated: {description: UNAUTHENTICATED, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: FORBIDDEN, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: NOT_FOUND, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    RateLimited: {description: RATE_LIMITED (Retry-After 헤더), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, description: "VALIDATION_ERROR, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, CONFLICT, RATE_LIMITED, INTERNAL 또는 엔드포인트별 코드"}
+            message: {type: string, description: 한국어 메시지}
+            fields: {type: object, additionalProperties: {type: string}}
+    PostType: {type: string, enum: [LOST, FOUND]}
+    PostStatus: {type: string, enum: [OPEN, MATCHED, RETURNED, CLOSED]}
+    Settings:
+      type: object
+      properties: {notifyMatch: {type: boolean}, notifyComment: {type: boolean}, notifyMessage: {type: boolean}}
+    Unread:
+      type: object
+      properties: {notifications: {type: integer}, messages: {type: integer}}
+    Me:
+      type: object
+      properties:
+        id: {type: integer}
+        loginId: {type: string}
+        nickname: {type: string}
+        settings: {$ref: '#/components/schemas/Settings'}
+        unread: {$ref: '#/components/schemas/Unread'}
+    UserProfile:
+      type: object
+      properties: {id: {type: integer}, nickname: {type: string}, createdAt: {type: string, format: date-time}, postCount: {type: integer}, isBlockedByMe: {type: boolean}}
+    AuthorRef:
+      type: object
+      properties: {id: {type: integer}, nickname: {type: string}}
+    Location:
+      type: object
+      description: "목록(/locations)은 표시 순서대로 내려간다. buildingId 'etc'(\"기타\")는 글의 locationText 로 장소를 직접 적는 항목이다."
+      properties: {id: {type: integer}, buildingId: {type: string, description: 같은 건물의 모든 층이 공유하는 식별자}, buildingName: {type: string}, floor: {type: integer, nullable: true}, lat: {type: number}, lng: {type: number}}
+    Tag:
+      type: object
+      properties: {id: {type: integer}, name: {type: string}, isPreset: {type: boolean}, isCategory: {type: boolean}}
+    Photo:
+      type: object
+      description: |
+        요청자 관점의 사진 정보 [가정/제안 — 민감 사진 흐림].
+        민감 사진(학생증·카드·얼굴 등)은 작성자와 소유 확인(VERIFIED) 이후의 인수 상대에게만 원본(`isBlurred=false`)이 내려가고,
+        그 외 사용자에게는 흐림 처리된 사본 URL(`isBlurred=true`)이 내려간다. 흐림 사본을 만들 수 없으면 `url=null`(원본으로 대체하지 않음).
+        `sensitive`: 작성자에게는 유효 민감 플래그, 그 외에는 `isBlurred` 와 같다.
+      properties:
+        photoId: {type: integer}
+        url: {type: string, nullable: true}
+        width: {type: integer}
+        height: {type: integer}
+        isBlurred: {type: boolean}
+        sensitive: {type: boolean}
+    PhotoSensitivity:
+      type: object
+      description: 작성자 관점. hasBlurredCopy=false 이면 흐림 사본 생성 실패(작성자 외에는 사진이 보이지 않음, 재시도는 같은 요청 반복)
+      properties:
+        photoId: {type: integer}
+        url: {type: string}
+        width: {type: integer}
+        height: {type: integer}
+        isBlurred: {type: boolean}
+        sensitive: {type: boolean}
+        hasBlurredCopy: {type: boolean}
+    PostCard:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {$ref: '#/components/schemas/PostType'}
+        title: {type: string}
+        status: {$ref: '#/components/schemas/PostStatus'}
+        thumbnailUrl: {type: string, nullable: true, description: '민감 사진은 작성자 외에는 흐림 사본 URL (사본 없으면 null)'}
+        hasSensitivePhoto: {type: boolean}
+        locationName: {type: string}
+        locationText: {type: string, nullable: true, description: "위치가 기타(etc)일 때 작성자가 입력한 장소. 그 외 null. 표시는 클라이언트가 조합(예: 기타 · {locationText})"}
+        occurredAt: {type: string, format: date-time}
+        tags: {type: array, items: {type: string}}
+        author: {$ref: '#/components/schemas/AuthorRef'}
+        createdAt: {type: string, format: date-time}
+    PostCardPage:
+      type: object
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/PostCard'}}, nextCursor: {type: string, nullable: true}}
+    PostDetail:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {$ref: '#/components/schemas/PostType'}
+        title: {type: string}
+        description: {type: string}
+        status: {$ref: '#/components/schemas/PostStatus'}
+        matchState: {type: string, enum: [PENDING, DONE, FAILED]}
+        occurredAt: {type: string, format: date-time}
+        location: {$ref: '#/components/schemas/Location'}
+        locationText: {type: string, nullable: true, description: 위치가 기타(etc)일 때 입력한 장소. 그 외 null}
+        lat: {type: number, nullable: true}
+        lng: {type: number, nullable: true}
+        storagePlace: {type: string, nullable: true}
+        hiddenFeatures: {type: string, nullable: true, description: 작성자 본인에게만 노출}
+        photos: {type: array, items: {$ref: '#/components/schemas/Photo'}}
+        hasSensitivePhoto: {type: boolean}
+        tags: {type: array, items: {type: string}}
+        author: {$ref: '#/components/schemas/AuthorRef'}
+        commentCount: {type: integer}
+        isMine: {type: boolean}
+        createdAt: {type: string, format: date-time}
+    PostCreate:
+      type: object
+      required: [type, title, description, locationId, occurredAt]
+      properties:
+        type: {$ref: '#/components/schemas/PostType'}
+        title: {type: string, maxLength: 50}
+        description: {type: string, maxLength: 1000}
+        locationId: {type: integer}
+        lat: {type: number}
+        lng: {type: number}
+        occurredAt: {type: string, format: date-time}
+        tags: {type: array, maxItems: 8, items: {type: string, maxLength: 20}}
+        storagePlace: {type: string, maxLength: 100, description: FOUND 필수}
+        hiddenFeatures: {type: string, maxLength: 300}
+        locationText: {type: string, nullable: true, maxLength: 50, description: "위치가 기타(etc)면 필수(앞뒤 공백 제거 후 1~50자), 그 외 위치는 비우거나 null(값이 있으면 400 VALIDATION_ERROR)"}
+        photoIds: {type: array, maxItems: 3, items: {type: integer}}
+    PostUpdate:
+      type: object
+      properties:
+        title: {type: string, maxLength: 50}
+        description: {type: string, maxLength: 1000}
+        tags: {type: array, maxItems: 8, items: {type: string, maxLength: 20}}
+        storagePlace: {type: string, maxLength: 100}
+        hiddenFeatures: {type: string, maxLength: 300}
+        locationText: {type: string, nullable: true, maxLength: 50, description: "위치가 기타(etc)인 글만 수정 가능(1~50자). 그 외 위치에서 값을 보내면 400"}
+    Comment:
+      type: object
+      properties:
+        id: {type: integer}
+        postId: {type: integer}
+        parentId: {type: integer, nullable: true}
+        author: {$ref: '#/components/schemas/AuthorRef'}
+        body: {type: string, nullable: true, description: DELETED면 null}
+        status: {type: string, enum: [VISIBLE, DELETED]}
+        createdAt: {type: string, format: date-time}
+        editedAt: {type: string, format: date-time, nullable: true}
+        isMine: {type: boolean}
+        replies: {type: array, items: {$ref: '#/components/schemas/Comment'}}
+    MyComment:
+      allOf:
+        - {$ref: '#/components/schemas/Comment'}
+        - type: object
+          properties: {postTitle: {type: string}}
+    Notification:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {type: string, enum: [MATCH, COMMENT, REPLY, MESSAGE]}
+        text: {type: string, description: 서버 생성 문구 (물건·위치 비포함)}
+        createdAt: {type: string, format: date-time}
+        readAt: {type: string, format: date-time, nullable: true}
+        target:
+          type: object
+          properties: {kind: {type: string, enum: [match, comment, conversation]}, id: {type: integer}, postId: {type: integer, nullable: true}}
+    MatchItem:
+      type: object
+      properties:
+        matchId: {type: integer}
+        level: {type: string, enum: [AUTO, CANDIDATE]}
+        grade: {type: string, enum: [HIGH, MID]}
+        otherPost: {$ref: '#/components/schemas/PostCard', description: author.id 는 항상 포함(닉네임만 노출, 내부 user id)}
+        locationDiff: {type: string, enum: [SAME_PLACE, SAME_BUILDING, NEARBY, FAR]}
+        aiReason: {type: string, nullable: true}
+        status: {type: string, enum: [PENDING, CONFIRMED, REJECTED]}
+    ConversationItem:
+      type: object
+      properties:
+        id: {type: integer}
+        other: {$ref: '#/components/schemas/AuthorRef'}
+        lastMessage: {type: object, nullable: true, properties: {createdAt: {type: string, format: date-time}, type: {type: string}}}
+        unread: {type: integer}
+        muted: {type: boolean}
+        readOnly: {type: boolean}
+        postContext: {type: object, nullable: true, properties: {id: {type: integer}, title: {type: string}}}
+        handover: {allOf: [{$ref: '#/components/schemas/Handover'}], nullable: true, description: 이 대화의 가장 최근 인수 요청(없으면 null)}
+    ConversationStart:
+      type: object
+      properties: {conversation: {$ref: '#/components/schemas/ConversationItem'}, message: {$ref: '#/components/schemas/Message'}}
+    Message:
+      type: object
+      properties:
+        id: {type: integer}
+        conversationId: {type: integer}
+        senderId: {type: integer}
+        type: {type: string, enum: [TEXT, SYSTEM, VERIFY_QUESTION, VERIFY_ANSWER]}
+        body: {type: string}
+        postId: {type: integer, nullable: true}
+        createdAt: {type: string, format: date-time}
+    Handover:
+      type: object
+      properties:
+        id: {type: integer}
+        conversationId: {type: integer}
+        postId: {type: integer}
+        matchId: {type: integer, nullable: true}
+        status: {type: string, enum: [REQUESTED, VERIFIED, COMPLETED, REJECTED]}
+        finderId: {type: integer, description: 습득자 user id (습득글 작성자, 분실글이 대상이면 그 작성자의 대화 상대)}
+        ownerId: {type: integer, description: 주인 user id}
+        myRole: {type: string, enum: [FINDER, OWNER]}
+        myConfirmed: {type: boolean, description: 내가 인수 완료를 확인했는가}
+        otherConfirmed: {type: boolean}
+        canVerify: {type: boolean, description: 내가 소유 확인을 할 수 있는가 (습득자 + REQUESTED)}
+        canReject: {type: boolean}
+        canComplete: {type: boolean, description: 내가 인수 완료를 누를 수 있는가 (VERIFIED + 아직 내가 확인 안 함)}
+        counterpartLinked: {type: boolean, nullable: true, description: '완료(COMPLETED) 후에만 값이 있다. true = 상대 글(짝)까지 RETURNED 로 닫고 matchId 를 기록함(요청 시 지정했거나 서버가 추론). false = 짝을 특정하지 못해 이 글만 닫힘(폴백). 완료 전 null [가정/제안]'}

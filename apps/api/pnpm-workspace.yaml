@@ -1,0 +1,20 @@
+# pnpm 10+ 는 의존성의 빌드 스크립트를 승인 없이 실행하지 않고, 미승인이 있으면 설치를 실패시킨다.
+# 필요한 것만 패키지별로 승인한다(전체 허용 금지).
+allowBuilds:
+  # embedded-postgres 플랫폼 바이너리: postinstall 이 심볼릭 링크를 복원한다(Windows 외 OS 에서 필요)
+  '@embedded-postgres/darwin-arm64': true
+  '@embedded-postgres/darwin-x64': true
+  '@embedded-postgres/linux-arm': true
+  '@embedded-postgres/linux-arm64': true
+  '@embedded-postgres/linux-ia32': true
+  '@embedded-postgres/linux-ppc64': true
+  '@embedded-postgres/linux-x64': true
+  '@embedded-postgres/windows-x64': true
+  # 아래는 빌드 없이 동작함을 확인(argon2 는 사전 빌드 바이너리, esbuild 는 플랫폼 패키지 바이너리, scarf 는 통계 수집)
+  argon2: false
+  esbuild: false
+  '@scarf/scarf': false
+
+# drizzle-kit 이 끌어오는 구버전 esbuild(<=0.24.2, 개발 서버 요청 노출 취약점 GHSA-67mh-4wv8-2f99)를 패치 버전으로 고정
+overrides:
+  '@esbuild-kit/core-utils>esbuild': '^0.25.0'

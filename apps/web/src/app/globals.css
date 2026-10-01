@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/*
+ * 디자인 토큰. 로그인 화면(KU 초록 강조 + slate 무채색 + 흰 베일 위 옅은 초록 그라데이션)을 앱 전체 기준으로 삼는다.
+ * inline 이 아닌 @theme 를 써서 CSS 변수(--color-*)가 실제로 생성되게 한다(포커스 링 등에서 var()로 참조).
+ */
+@theme {
+  /*
+   * 브랜드(강조색) — KU 초록(#0f6e3a)을 600 으로 둔 초록 스케일. 600 이 기본 강조색, 700 이 hover/진한 텍스트, 50 이 옅은 배경.
+   * 대비: 흰 글자 기준 600 6.3:1, 700 8.3:1 / 흰 배경 위 600 글자 6.3:1.
+   */
+  --color-brand-50: #ecf7f0;
+  --color-brand-100: #d3eedd;
+  --color-brand-200: #a8dcbc;
+  --color-brand-300: #74c495;
+  --color-brand-400: #3fa66c;
+  --color-brand-500: #1b8a4c;
+  --color-brand-600: #0f6e3a;
+  --color-brand-700: #0b5a2f;
+  --color-brand-800: #094a27;
+  --color-brand-900: #073b1f;
+
+  /* 로고 워드마크 "KU" 초록(사용자 지정). brand-600 과 같은 값이다. */
+  --color-ku-green: #0f6e3a;
+
+  /*
+   * 무채색: 기존 화면이 zinc-* 를 쓰고 있어, 페이지 수정 없이 로그인과 같은 slate 톤이 되도록 zinc 값을 slate 로 재정의한다.
+   * 새 코드에서는 slate-* 를 직접 써도 같은 색이다.
+   */
+  --color-zinc-50: #f8fafc;
+  --color-zinc-100: #f1f5f9;
+  --color-zinc-200: #e2e8f0;
+  --color-zinc-300: #cbd5e1;
+  --color-zinc-400: #94a3b8;
+  --color-zinc-500: #64748b;
+  --color-zinc-600: #475569;
+  --color-zinc-700: #334155;
+  --color-zinc-800: #1e293b;
+  --color-zinc-900: #0f172a;
+  --color-zinc-950: #020617;
+
+  /* 페이지 배경·본문 */
+  --color-background: #f1f5f9;
+  --color-foreground: #0f172a;
+
+  /* 분실/습득 구분색 */
+  --color-lost: #c2410c;
+  --color-lost-bg: #fff1e6;
+  --color-found: #1d4ed8;
+  --color-found-bg: #e8f0ff;
+
+  /* 카드 그림자(로그인 카드와 같은 계열의 옅은 그림자) */
+  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 8px 24px -8px rgb(15 23 42 / 0.08);
+}
+
+@theme inline {
+  --font-sans:
+    var(--font-geist-sans), "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+}
+
+:root {
+  /* 모바일 하단 메뉴(AppShell) 높이. 하단에 붙는 요소(쪽지 입력창 등)가 메뉴 위에 오도록 참조한다. */
+  --bottom-nav-h: 4rem;
+  /*
+   * 앱 공통 배경 = 흰 베일(--page-veil) 위에 옅은 초록 그라데이션(--page-gradient-ku).
+   * 값은 여기 한 곳에만 둔다: body·bg-page·bg-page-ku 와 로그인 main 이 모두 참조한다.
+   * 로그인은 베일과 초록 사이에 선택 레이어(캠퍼스 사진)를 끼우므로 두 토큰을 따로 둔다.
+   */
+  --page-veil: linear-gradient(
+    180deg,
+    rgb(255 255 255 / 0.6) 0%,
+    rgb(255 255 255 / 0.1) 45%,
+    rgb(255 255 255 / 0.35) 100%
+  );
+  --page-gradient-ku:
+    radial-gradient(circle at 15% 85%, #c6ead3 0%, transparent 45%),
+    radial-gradient(circle at 55% 30%, #d3eedd 0%, transparent 40%),
+    linear-gradient(160deg, #e3f3e9 0%, #f1f8f4 50%, #e2e8f0 100%);
+  /* 이전 이름 호환: 배경 그라데이션 */
+  --page-gradient: var(--page-gradient-ku);
+}
+
+/* 흰 카드 표면: 로그인 카드와 같은 흰 배경·둥근 모서리·옅은 테두리와 그림자 */
+@utility card {
+  background-color: #fff;
+  border-radius: var(--radius-2xl);
+  border: 1px solid rgb(226 232 240 / 0.7);
+  box-shadow: var(--shadow-card);
+}
+
+/* 로그인 후 메인 화면 배경: 로그인 화면과 같은 흰 베일 + 초록 그라데이션 */
+@utility bg-page-ku {
+  background-color: var(--color-background);
+  background-image: var(--page-veil), var(--page-gradient-ku);
+  background-attachment: fixed;
+}
+
+/* 페이지 배경(bg-page-ku 와 같음) */
+@utility bg-page {
+  background-color: var(--color-background);
+  background-image: var(--page-veil), var(--page-gradient-ku);
+  background-attachment: fixed;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-background);
+    background-image: var(--page-veil), var(--page-gradient-ku);
+    background-attachment: fixed;
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+
+  /*
+   * 포커스 링은 항상 보이게 유지(접근성). base 레이어에 두어 화면별 outline-* 유틸리티로 덮어쓸 수 있게 한다.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "handover_active_conv_uq" ON "handover_requests" USING btree ("conversation_id") WHERE "handover_requests"."status" in ('REQUESTED', 'VERIFIED');

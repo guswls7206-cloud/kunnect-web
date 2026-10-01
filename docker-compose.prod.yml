@@ -1,0 +1,78 @@
+# KUnnect 운영(또는 스테이징) 구성: API + PostgreSQL + 사진 볼륨.
+# 사용:  cp apps/api/.env.example .env.prod  → 값 채우기(특히 POSTGRES_PASSWORD, ALLOWED_ORIGINS)
+#        docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+# ※ 이 파일은 정적 검사(apps/api/scripts/check-compose.mjs)만 했고 Docker 로 실행해 보지 못했다(docs/deploy-backend.md).
+# 개발용 DB 만 필요하면 기존 docker-compose.yml 을 쓴다.
+
+name: kunnect
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kunnect
+      POSTGRES_DB: kunnect
+      # 필수: 비어 있으면 compose 가 실행을 거부한다
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 를 .env.prod 에 설정하세요}
+    volumes:
+      # postgres:18 이미지는 /var/lib/postgresql 아래에 버전 디렉터리를 만든다(기존 개발 compose 와 동일 경로)
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kunnect -d kunnect"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # DB 는 호스트에 공개하지 않는다(ports 없음): API 컨테이너만 내부 네트워크로 접근한다.
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    image: kunnect-api:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgres://kunnect:${POSTGRES_PASSWORD}@db:5432/kunnect
+      STORAGE_DIR: /data/storage
+      # 필수: 프런트 주소(쉼표 구분). 예) https://kunnect.example.com
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS 를 .env.prod 에 설정하세요}
+      # API 앞에 리버스 프록시가 한 단계 있으므로 1(직접 노출 금지). docs/deploy-backend.md 참고
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      NOPHOTO_AUTO_NOTIFY: ${NOPHOTO_AUTO_NOTIFY:-false}
+      RETENTION_POST_DAYS: ${RETENTION_POST_DAYS:-90}
+      RETENTION_DM_DAYS: ${RETENTION_DM_DAYS:-30}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      RUN_SEED: ${RUN_SEED:-true}
+    volumes:
+      - photos:/data/storage
+    ports:
+      # 기본은 루프백만: HTTPS 를 종단하는 리버스 프록시(Nginx/Caddy/Next 서버)만 접근한다.
+      - "${API_BIND:-127.0.0.1:4000}:4000"
+    # 이미지의 HEALTHCHECK 를 그대로 사용한다.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  pgdata:
+  # 사진 원본·AI 축소 사본. 백업 대상(docs/deploy-backend.md 의 백업 절)
+  photos:
+
+networks:
+  internal:

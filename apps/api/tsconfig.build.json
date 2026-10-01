@@ -1,0 +1,14 @@
+{
+  // 운영 이미지 빌드 전용: 개발용 tsconfig.json(noEmit)과 달리 dist/ 에 JS 를 내보낸다.
+  // 결과 구조: dist/src/server.js, dist/scripts/migrate.js (마이그레이션 SQL 은 Dockerfile 이 복사한다)
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "scripts/migrate.ts", "scripts/seed.ts"],
+  "exclude": ["node_modules", "src/matching/node_modules", "src/matching/eval", "src/matching/scripts", "src/**/*.test.ts"]
+}

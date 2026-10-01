@@ -1,0 +1,20 @@
+# 의존성·빌드 산출물
+node_modules/
+.next/
+dist/
+coverage/
+# 시크릿·환경 파일(예시 파일 .env.example 만 추적)
+.env
+.env.*
+!.env.example
+# 로컬 DB·업로드·테스트 산출물
+.pgdata/
+**/.pgdata/
+/storage/
+apps/api/storage/
+test-results/
+playwright-report/
+apps/api/test/live/out/
+# OS/에디터
+.DS_Store
+Thumbs.db
